@@ -1,0 +1,12 @@
+#Secrets
+secrets.env
+
+#Core
+/socopensource/misp-db/*
+/socopensource/traefik/*
+/socopensource/mariadb/*
+
+#Suricata
+/detection/suricata/surilog/*
+/detection/suricata/suriconf/*
+/detection/suricata/surirules/*

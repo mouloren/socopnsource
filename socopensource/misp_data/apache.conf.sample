@@ -1,0 +1,13 @@
+<VirtualHost *:80>
+ServerAdmin admin@localhost
+ServerName midominio
+DocumentRoot /var/www/MISP/app/webroot
+<Directory /var/www/MISP/app/webroot>
+Options -Indexes
+AllowOverride all
+</Directory>
+LogLevel warn
+ErrorLog /var/log/apache2/misp_error.log
+CustomLog /var/log/apache2/misp_access.log combined
+ServerSignature Off
+</VirtualHost>

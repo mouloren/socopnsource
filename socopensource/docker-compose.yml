@@ -1,0 +1,271 @@
+version: "3.5"
+
+services:
+  traefik:
+    image: traefik:v2.1
+    container_name: "traefik"
+    restart: unless-stopped
+    command:
+      # Globals
+      #- --log.level=DEBUG
+      - --accesslog=true
+      - --api.insecure=true
+      # Docker
+      - --providers.docker=true
+      - --providers.docker.exposedbydefault=false
+      - --providers.docker.endpoint=unix:///var/run/docker.sock
+      # Entrypoints
+      - --serverstransport.insecureskipverify=true
+      - --entryPoints.web.address=:80
+      - --entryPoints.websecure.address=:443
+      # LetsEncrypt
+      - "--certificatesresolvers.mydnschallenge.acme.email=${CF_API_EMAIL}"
+      - "--certificatesresolvers.mydnschallenge.acme.dnschallenge=true"
+      - "--certificatesresolvers.mydnschallenge.acme.dnschallenge.provider=cloudflare"
+      - "--certificatesresolvers.mydnschallenge.acme.storage=/etc/traefik/acme.json"
+    environment:
+      - CF_API_EMAIL=${CF_API_EMAIL}
+      - CF_DNS_API_TOKEN=${CF_DNS_API_TOKEN}
+      - CF_ZONE_API_TOKEN=${CF_ZONE_API_TOKEN}
+    ports:
+      - "80:80"
+      - "443:443"
+      - "8080:8080"
+    volumes:
+      - "/var/run/docker.sock:/var/run/docker.sock:ro"
+      - "./traefik/acme.json:/etc/traefik/acme.json"
+    labels:
+      # API
+      - "traefik.enable=true"
+      - "traefik.http.routers.traefik.rule=Host(`traefik.${DOMAIN}`)"
+      - "traefik.http.routers.traefik.entrypoints=websecure"
+      - "traefik.http.routers.traefik.tls.certresolver=mydnschallenge"
+      - "traefik.http.services.traefik.loadbalancer.server.port=8080"
+      # Global http-->https
+      - "traefik.http.middlewares.redirect-to-https.redirectscheme.scheme=https"
+      - "traefik.http.routers.http-catchall.rule=hostregexp(`{host:[a-z-.]+}`)"
+      - "traefik.http.routers.http-catchall.entrypoints=web"
+      - "traefik.http.routers.http-catchall.middlewares=redirect-to-https@docker"
+      - "traefik.http.middlewares.redirect-to-https.redirectscheme.permanent=true"
+  portainer:
+    image: portainer/portainer:latest
+    restart: unless-stopped
+    command: -H unix:///var/run/docker.sock
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - portainer_data:/data
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.portainer.rule=Host(`portainer.${DOMAIN}`)"
+      - "traefik.http.routers.portainer.entrypoints=websecure"
+      - "traefik.http.routers.portainer.tls.certresolver=mydnschallenge"
+      - "traefik.http.services.portainer.loadbalancer.server.port=9000"
+  cyberchef:
+    image: mpepping/cyberchef:latest
+    restart: unless-stopped
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.cyberchef.rule=Host(`cyberchef.${DOMAIN}`)"
+      - "traefik.http.routers.cyberchef.entrypoints=websecure"
+      - "traefik.http.routers.cyberchef.tls.certresolver=mydnschallenge"
+      - "traefik.http.services.cyberchef.loadbalancer.server.port=8000"
+  postgres:
+    image: postgres:11-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${DB_NAME}
+      POSTGRES_PASSWORD: ${DB_PASS}
+      POSTGRES_USER: ${DB_USER}
+    logging:
+      driver: "none"
+    restart: unless-stopped
+    volumes:
+      - db-data:/var/lib/postgresql/data
+
+  wiki:
+    image: requarks/wiki:latest
+    depends_on:
+      - postgres
+    environment:
+      DB_TYPE: ${DB_TYPE}
+      DB_HOST: ${DB_HOST}
+      DB_PORT: ${DB_PORT}
+      DB_USER: ${DB_USER}
+      DB_PASS: ${DB_PASS}
+      DB_NAME: ${DB_NAME}
+    restart: unless-stopped
+    ports:
+      - "3080:3000"
+      - "3443:3443"
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.wiki.rule=Host(`wiki.${DOMAIN}`)"
+      - "traefik.http.routers.wiki.entrypoints=websecure"
+      - "traefik.http.routers.wiki.tls.certresolver=mydnschallenge"
+      - "traefik.http.services.wiki.loadbalancer.server.port=3000"
+  gitea:
+    image: gitea/gitea:latest
+    restart: unless-stopped
+    volumes:
+      - ./data:/data
+    ports:
+      - "2222:22"
+    depends_on:
+      - mariadb
+    restart: always
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.git.rule=Host(`git.${DOMAIN}`)"
+      - "traefik.http.routers.git.entrypoints=websecure"
+      - "traefik.http.routers.git.tls.certresolver=mydnschallenge"
+      - "traefik.http.services.git.loadbalancer.server.port=3000"
+  mariadb:
+    image: mariadb:10
+    restart: unless-stopped
+    environment:
+      - MYSQL_ROOT_PASSWORD=${MYSQL_ROOT_PASSWORD}
+      - MYSQL_DATABASE=${MYSQL_DATABASE}
+      - MYSQL_USER=${MYSQL_USER}
+      - MYSQL_PASSWORD=${MYSQL_PASSWORD}
+    volumes:
+      - ./mariadb/:/var/lib/mysql
+  elasticsearch:
+    image: elasticsearch:7.8.1
+    environment:
+      - http.host=0.0.0.0
+      - discovery.type=single-node
+      - script.allowed_types=inline
+      - thread_pool.search.queue_size=100000
+      - thread_pool.write.queue_size=10000
+    volumes:
+      - elastic-data:/usr/share/elasticsearch/data
+  cortex:
+    image: thehiveproject/cortex:3.1.0-1
+    restart: unless-stopped
+    depends_on:
+      - elasticsearch
+    ports:
+      - "9001:9001"
+    environment:
+      - analyzer_urls=https://download.thehive-project.org/analyzers.json
+      - responder_urls=https://download.thehive-project.org/responders.json
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - /tmp/cortex-jobs:/tmp/cortex-jobs
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.cortex.rule=Host(`cortex.${DOMAIN}`)"
+      - "traefik.http.routers.cortex.entrypoints=websecure"
+      - "traefik.http.routers.cortex.tls.certresolver=mydnschallenge"
+      - "traefik.http.services.cortex.loadbalancer.server.port=9001"
+  kibana:
+    image: docker.elastic.co/kibana/kibana:7.8.1
+    restart: unless-stopped
+    depends_on:
+      - elasticsearch
+    environment:
+      ELASTICSEARCH_HOSTS: http://elasticsearch:9200
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.kibana.rule=Host(`kibana.${DOMAIN}`)"
+      - "traefik.http.routers.kibana.entrypoints=websecure"
+      - "traefik.http.routers.kibana.tls.certresolver=mydnschallenge"
+      - "traefik.http.services.kibana.loadbalancer.server.port=5601"
+  thehive:
+    image: thehiveproject/thehive:3.5.0-1
+    restart: unless-stopped
+    depends_on:
+      - cortex
+      - elasticsearch
+    volumes:
+      - ./thehive_conf/application.conf:/etc/thehive/application.conf
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.th.rule=Host(`th.${DOMAIN}`)"
+      - "traefik.http.routers.th.entrypoints=websecure"
+      - "traefik.http.routers.th.tls.certresolver=mydnschallenge"
+      - "traefik.http.services.th.loadbalancer.server.port=9000"
+    command: --cortex-port 9001    
+  misp:
+    image: harvarditsecurity/misp
+    restart: unless-stopped
+    ports:
+      - "8090:80"
+      - "8443:443"
+      - "3306:3306"
+    volumes:
+      - ./misp-db:/var/lib/mysql
+      - ./misp_data/apache.conf:/etc/apache2/sites-available/000-default.conf
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.misp.rule=Host(`misp.${DOMAIN}`)"
+      - "traefik.http.routers.misp.entrypoints=websecure"
+      - "traefik.http.routers.misp.tls.certresolver=mydnschallenge"
+      - "traefik.http.services.misp.loadbalancer.server.port=80"
+  watchower:
+    image: containrrr/watchtower
+    restart: unless-stopped
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    environment:
+      - WATCHTOWER_NOTIFICATIONS=email
+      - WATCHTOWER_NOTIFICATION_EMAIL_FROM=${WATCHTOWER_NOTIFICATION_EMAIL_FROM}
+      - WATCHTOWER_NOTIFICATION_EMAIL_TO=${WATCHTOWER_NOTIFICATION_EMAIL_TO}
+      - WATCHTOWER_NOTIFICATION_EMAIL_SERVER=${WATCHTOWER_NOTIFICATION_EMAIL_SERVER}
+      - WATCHTOWER_NOTIFICATION_EMAIL_SERVER_USER=${WATCHTOWER_NOTIFICATION_EMAIL_SERVER_USER}
+      - WATCHTOWER_NOTIFICATION_EMAIL_SERVER_PASSWORD=${WATCHTOWER_NOTIFICATION_EMAIL_SERVER_PASSWORD}
+      - WATCHTOWER_NOTIFICATION_EMAIL_DELAY=2
+
+  rocketchat:
+    image: rocketchat/rocket.chat:latest
+    restart: unless-stopped
+    command: >
+      bash -c
+        "for i in `seq 1 30`; do
+          node main.js &&
+          s=$$? && break || s=$$?;
+          echo \"Tried $$i times. Waiting 5 secs...\";
+          sleep 5;
+        done; (exit $$s)"
+    restart: unless-stopped
+    volumes:
+      - ./uploads:/app/uploads
+    environment:
+      - PORT=3000
+      - ROOT_URL=${ROCKET_ROOT_URL}
+      - MONGO_URL=${MONGO_URL}
+      - MONGO_OPLOG_URL=${MONGO_OPLOG_URL}
+      - MAIL_URL=${ROCKET_MAIL_URL}
+    depends_on:
+      - mongo
+    ports:
+      - 3000:3000
+
+  mongo:
+    image: mongo:4.0
+    restart: unless-stopped
+    volumes:
+     - ./data/db:/data/db
+    command: mongod --smallfiles --oplogSize 128 --replSet rs0 --storageEngine=mmapv1
+
+  mongo-init-replica:
+    image: mongo:4.0
+    restart: unless-stopped
+    command: >
+      bash -c
+        "for i in `seq 1 30`; do
+          mongo mongo/rocketchat --eval \"
+            rs.initiate({
+              _id: 'rs0',
+              members: [ { _id: 0, host: 'localhost:27017' } ]})\" &&
+          s=$$? && break || s=$$?;
+          echo \"Tried $$i times. Waiting 5 secs...\";
+          sleep 5;
+        done; (exit $$s)"
+    depends_on:
+      - mongo
+
+volumes:
+  portainer_data:
+  db-data:
+  elastic-data:
